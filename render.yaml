@@ -3,8 +3,8 @@ services:
     name: smartic-database-backup
     runtime: docker
     dockerfilePath: ./scripts/backup.Dockerfile
-    dockerContext: ./scripts
-    schedule: "0 2 * * *"
+    dockerContext: .
+    schedule: "*/30 * * * *"
     plan: starter
     envVars:
       - key: DATABASE_URL

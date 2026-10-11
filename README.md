@@ -1,7 +1,7 @@
 # Smartic database backup
 
 Backup PostgreSQL para S3, independente do repositorio da aplicacao.
-O cron job esta definido para executar diariamente as 02:00 UTC.
+O cron job esta definido para executar de 30 em 30 minutos (minutos 00 e 30).
 
 ## Ativar no Render
 
@@ -16,6 +16,18 @@ O cron job esta definido para executar diariamente as 02:00 UTC.
 
 Se o cron job ja existir no Render ligado ao repositorio `smartic`, alterar a
 ligacao para este repositorio em vez de manter dois agendamentos ativos.
+
+Na configuracao manual do Render, usar:
+
+- Language: Docker
+- Root Directory: vazio
+- Dockerfile Path: `./scripts/backup.Dockerfile`
+- Docker Build Context Directory: `.` (raiz do repositorio)
+- Docker Command: vazio
+- Schedule: `*/30 * * * *`
+
+O `COPY` e as regras de exclusao do Docker usam caminhos relativos a raiz.
+Nao definir o contexto como `./scripts`.
 
 O contentor inclui pg_dump/pg_restore 18. Confirmar compatibilidade com a versao
 da base antes da primeira execucao. Ainda nao foi validado um backup em producao.

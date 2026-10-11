@@ -1,4 +1,5 @@
 **
-!backup_database.py
-!backup.Dockerfile
-!backup.Dockerfile.dockerignore
+!scripts/
+!scripts/backup_database.py
+!scripts/backup.Dockerfile
+!scripts/backup.Dockerfile.dockerignore

@@ -9,7 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/backup
-COPY backup_database.py ./backup_database.py
+COPY scripts/backup_database.py ./backup_database.py
 ENV PYTHONUNBUFFERED=1
 USER postgres
 # Replace the postgres image entrypoint: this container only runs the backup.

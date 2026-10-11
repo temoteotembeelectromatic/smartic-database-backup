@@ -32,8 +32,8 @@ Comando manual: `python scripts/backup_database.py`.
 
 ### Cron job Render
 
-O `render.yaml` define `smartic-database-backup`, diariamente as 02:00 UTC
-(`0 2 * * *`). Em Lisboa corresponde as 02:00 no inverno e as 03:00 no verao.
+O `render.yaml` define `smartic-database-backup`, de 30 em 30 minutos
+(`*/30 * * * *`), aos minutos 00 e 30 de cada hora.
 O job usa `scripts/backup.Dockerfile`, que inclui Python, boto3 e os clientes
 PostgreSQL 18; nao depende das ferramentas instaladas no servico web.
 pg_dump 18 suporta servidores de versoes anteriores, mas nao servidores posteriores
@@ -54,17 +54,17 @@ Para ativar:
 Para testar a imagem num computador com Docker, a partir da raiz do projeto:
 
 ```sh
-docker build -f scripts/backup.Dockerfile -t smartic-db-backup scripts
+docker build -f scripts/backup.Dockerfile -t smartic-db-backup .
 docker run --rm --env DATABASE_URL --env BACKUP_S3_BUCKET --env AWS_DEFAULT_REGION --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY smartic-db-backup
 ```
 
 O comando executa um backup real usando as variaveis exportadas no terminal.
 Com credenciais temporarias, passar tambem AWS_SESSION_TOKEN ao contentor/job.
 
-Agendamento configurado, ainda nao ativado: diariamente as 02:00 UTC. Retencao
-recomendada no S3: 30 dias. Um backup diario pode perder ate 24 horas de alteracoes (mais se houver falhas).
+Agendamento no repositorio: de 30 em 30 minutos; confirmar ativacao no Render. Retencao
+recomendada no S3: 30 dias. O intervalo entre backups aumenta se houver falhas ou execucoes demoradas.
 Configurar notificacoes de falha e alerta externo se nao surgir um manifesto valido
-em 26 horas. Confirmar se esse intervalo de perda de dados e aceitavel.
+em 90 minutos. Confirmar se esse intervalo de perda de dados e aceitavel.
 
 Configurar lifecycle no prefixo para expirar versoes atuais apos 30 dias, versoes
 nao atuais apos 30 dias, e abortar multipart incompleto apos 1 dia. Com versionamento,
