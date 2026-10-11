@@ -1,0 +1,21 @@
+services:
+  - type: cron
+    name: smartic-database-backup
+    runtime: docker
+    dockerfilePath: ./scripts/backup.Dockerfile
+    dockerContext: ./scripts
+    schedule: "0 2 * * *"
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_PREFIX
+        value: smartic-pro/postgres
+      - key: AWS_DEFAULT_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
