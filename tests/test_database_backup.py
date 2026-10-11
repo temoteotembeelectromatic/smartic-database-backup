@@ -47,7 +47,11 @@ class DatabaseBackupTests(unittest.TestCase):
         self.assertFalse(manifest["restore_tested"])
         self.assertEqual(manifest["bytes"], 15)
         self.assertNotIn(url, str(run.call_args_list[0].args))
-        self.assertEqual(run.call_args_list[0].kwargs["env"]["PGDATABASE"], url)
+        env = run.call_args_list[0].kwargs['env']
+        self.assertEqual(env['PGDATABASE'], 'database')
+        self.assertEqual(env['PGHOST'], 'host')
+        self.assertEqual(env['PGUSER'], 'user')
+        self.assertEqual(env['PGPASSWORD'], 'secret')
         self.s3.put_object.assert_called_once()
         upload = self.s3.upload_file.call_args
         self.assertEqual(upload.kwargs["ExtraArgs"]["ServerSideEncryption"], "AES256")
@@ -78,6 +82,26 @@ class DatabaseBackupTests(unittest.TestCase):
             backup.run_backup(self.s3, "postgresql://host/db", "backup-bucket")
         self.s3.get_object.assert_not_called()
         self.s3.put_object.assert_not_called()
+
+    @patch.dict(backup.os.environ, {'PGHOSTADDR': 'wrong-host', 'PGSERVICE': 'wrong-service', 'PGDATABASE': 'wrong-db'})
+    def test_url_decoding_ipv6_and_ssl_are_preserved(self):
+        env = backup.postgres_environment('postgresql://user%40name:p%40ss%3Aword@[::1]:5433/my%20db?sslmode=verify-full&connect_timeout=10')
+        self.assertEqual(env['PGUSER'], 'user@name')
+        self.assertEqual(env['PGPASSWORD'], 'p@ss:word')
+        self.assertEqual(env['PGHOST'], '::1')
+        self.assertEqual(env['PGPORT'], '5433')
+        self.assertEqual(env['PGDATABASE'], 'my db')
+        self.assertEqual(env['PGSSLMODE'], 'verify-full')
+        self.assertEqual(env['PGCONNECT_TIMEOUT'], '10')
+        self.assertNotIn('PGHOSTADDR', env)
+        self.assertNotIn('PGSERVICE', env)
+
+    def test_invalid_urls_fail_without_disclosing_input(self):
+        for url in ['secret', 'https://user:secret@host/db', 'postgresql://host',
+                    'postgresql://host:bad/db', 'postgresql://host/db?unknown=secret']:
+            with self.subTest(url=url), self.assertRaises(backup.BackupError) as raised:
+                backup.postgres_environment(url)
+            self.assertNotIn('secret', str(raised.exception))
 
 
 if __name__ == "__main__":

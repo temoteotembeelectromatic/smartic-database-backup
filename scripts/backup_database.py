@@ -10,15 +10,57 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from uuid import uuid4
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 class BackupError(RuntimeError):
     """Only fixed, credential-free diagnostics may use this exception."""
 
 
+def postgres_environment(database_url):
+    """PGDATABASE accepts a database name, not a connection URI."""
+    try:
+        url = urlsplit(database_url.strip())
+        if url.scheme not in {'postgres', 'postgresql'} or not url.hostname or not url.path.lstrip('/') or url.fragment:
+            raise ValueError()
+        values = {
+            'PGHOST': unquote(url.hostname),
+            'PGPORT': str(url.port or 5432),
+            'PGDATABASE': unquote(url.path[1:]),
+        }
+        if url.username is not None:
+            values['PGUSER'] = unquote(url.username)
+        if url.password is not None:
+            values['PGPASSWORD'] = unquote(url.password)
+        query_keys = {
+            'sslmode': 'PGSSLMODE', 'sslrootcert': 'PGSSLROOTCERT',
+            'sslcert': 'PGSSLCERT', 'sslkey': 'PGSSLKEY',
+            'connect_timeout': 'PGCONNECT_TIMEOUT', 'application_name': 'PGAPPNAME',
+            'options': 'PGOPTIONS', 'channel_binding': 'PGCHANNELBINDING',
+        }
+        for key, value in parse_qsl(url.query, keep_blank_values=True):
+            if key not in query_keys:
+                raise BackupError('PG_URL_OPTION: DATABASE_URL tem um parametro nao suportado; use a URL PostgreSQL fornecida pelo Render.')
+            values[query_keys[key]] = value
+        if any('\x00' in value for value in values.values()):
+            raise ValueError()
+    except ValueError:
+        raise BackupError('PG_URL: DATABASE_URL deve ser uma URL postgres:// ou postgresql:// valida, com servidor e nome da base.') from None
+    env = os.environ.copy()
+    # Avoid inherited connection/service settings redirecting the export.
+    for key in ('PGHOST', 'PGHOSTADDR', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSERVICE', 'PGSERVICEFILE', 'DATABASE_URL'):
+        env.pop(key, None)
+    env.update(values)
+    env['LC_ALL'] = 'C'
+    env.setdefault('PGSSLMODE', 'require')
+    env.setdefault('PGCONNECT_TIMEOUT', '30')
+    return env
+
+
 def dump_failure(stderr):
     text = (stderr or b'').decode('utf-8', errors='replace').lower()
     reasons = [
+        ('no such file or directory', 'PG_LOCAL: tentativa de ligacao local ou ficheiro necessario ausente. Confirme o servidor em DATABASE_URL.'),
         ('server does not support ssl', 'PG_SSL: o servidor nao suporta o SSL exigido. Confirme a ligacao e a configuracao SSL da base.'),
         ('password authentication failed', 'PG_AUTH: autenticacao rejeitada. Atualize DATABASE_URL com a ligacao correta.'),
         ('no password supplied', 'PG_PASSWORD: a ligacao nao forneceu a palavra-passe necessaria.'),
@@ -65,12 +107,8 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
     started = datetime.now(timezone.utc)
     key = (f"{prefix.strip('/')}/{started:%Y/%m/%d}/"
            f"{started:%H%M%S}-{uuid4().hex}.dump")
-    # Pass the connection string through the child environment, never argv/logs.
-    env = os.environ.copy()
-    env["PGDATABASE"] = database_url
-    env['LC_ALL'] = 'C'
-    env.setdefault("PGSSLMODE", "require")
-    env.setdefault("PGCONNECT_TIMEOUT", "30")
+    # Pass decoded connection parameters through the child environment, never argv/logs.
+    env = postgres_environment(database_url)
     with tempfile.TemporaryDirectory(prefix="smartic-db-backup-") as directory:
         archive = Path(directory) / "database.dump"
         progress('exportar PostgreSQL')
