@@ -12,6 +12,39 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 
+class BackupError(RuntimeError):
+    """Only fixed, credential-free diagnostics may use this exception."""
+
+
+def dump_failure(stderr):
+    text = (stderr or b'').decode('utf-8', errors='replace').lower()
+    reasons = [
+        ('server does not support ssl', 'PG_SSL: o servidor nao suporta o SSL exigido. Confirme a ligacao e a configuracao SSL da base.'),
+        ('password authentication failed', 'PG_AUTH: autenticacao rejeitada. Atualize DATABASE_URL com a ligacao correta.'),
+        ('no password supplied', 'PG_PASSWORD: a ligacao nao forneceu a palavra-passe necessaria.'),
+        ('could not translate host name', 'PG_DNS: hostname nao resolvido. Confirme DATABASE_URL e a regiao/rede do cron job.'),
+        ('name or service not known', 'PG_DNS: hostname nao resolvido. Confirme DATABASE_URL e a regiao/rede do cron job.'),
+        ('connection timed out', 'PG_TIMEOUT: ligacao expirou. Verifique rede, regiao e regras de acesso.'),
+        ('timeout expired', 'PG_TIMEOUT: ligacao expirou. Verifique rede, regiao e regras de acesso.'),
+        ('connection refused', 'PG_CONNECTION: ligacao recusada. Confirme servidor, porta e estado da base.'),
+        ('server version mismatch', 'PG_VERSION: pg_dump e mais antigo que o servidor. Atualize o cliente PostgreSQL.'),
+        ('permission denied', 'PG_PERMISSION: permissoes insuficientes. Verifique leitura de tabelas, sequencias e large objects e escrita no diretorio temporario.'),
+        ('row-level security', 'PG_RLS: as regras de seguranca impedem a exportacao completa.'),
+        ('no pg_hba.conf entry', 'PG_ACCESS: servidor rejeitou o acesso. Verifique utilizador, rede e SSL.'),
+        ('no space left on device', 'PG_DISK: espaco temporario insuficiente para o dump.'),
+        ('certificate verify failed', 'PG_CERTIFICATE: verificacao do certificado SSL falhou.'),
+        ('does not exist', 'PG_NOT_FOUND: a base ou um objeto necessario nao existe. Confirme DATABASE_URL.'),
+    ]
+    for marker, message in reasons:
+        if marker in text:
+            return message
+    return 'PG_DUMP: exportacao falhou por causa ainda nao classificada; stderr omitido para proteger dados e credenciais.'
+
+
+def progress(stage):
+    print(f'Backup etapa: {stage}', flush=True)
+
+
 def digest_stream(stream):
     digest = hashlib.sha256()
     size = 0
@@ -23,11 +56,11 @@ def digest_stream(stream):
 
 def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
     if not database_url or not bucket or not prefix.strip("/"):
-        raise ValueError("DATABASE_URL, BACKUP_S3_BUCKET e prefixo sao obrigatorios.")
+        raise BackupError("CONFIG: DATABASE_URL, BACKUP_S3_BUCKET e prefixo sao obrigatorios.")
     dump = shutil.which("pg_dump")
     restore = shutil.which("pg_restore")
     if not dump or not restore:
-        raise RuntimeError("Instale pg_dump e pg_restore antes de executar o backup.")
+        raise BackupError("DEPENDENCIES: instale pg_dump e pg_restore antes de executar o backup.")
 
     started = datetime.now(timezone.utc)
     key = (f"{prefix.strip('/')}/{started:%Y/%m/%d}/"
@@ -35,10 +68,12 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
     # Pass the connection string through the child environment, never argv/logs.
     env = os.environ.copy()
     env["PGDATABASE"] = database_url
+    env['LC_ALL'] = 'C'
     env.setdefault("PGSSLMODE", "require")
     env.setdefault("PGCONNECT_TIMEOUT", "30")
     with tempfile.TemporaryDirectory(prefix="smartic-db-backup-") as directory:
         archive = Path(directory) / "database.dump"
+        progress('exportar PostgreSQL')
         result = subprocess.run(
             [dump, "--format=custom", "--no-password", "--lock-wait-timeout=60s",
              "--file", str(archive)],
@@ -47,24 +82,27 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
         )
         if result.returncode:
             # PostgreSQL errors may contain connection details or row contents.
-            raise RuntimeError("pg_dump falhou; nenhum backup foi enviado. Verifique acesso, versao e espaco.")
+            raise BackupError(dump_failure(getattr(result, 'stderr', b'')))
+        progress('validar arquivo PostgreSQL')
         result = subprocess.run(
             [restore, "--list", str(archive)], stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, timeout=120,
         )
         if result.returncode:
-            raise RuntimeError("Arquivo rejeitado por pg_restore; nenhum backup foi enviado.")
+            raise BackupError("PG_RESTORE: arquivo rejeitado; nenhum backup foi enviado.")
         with archive.open("rb") as stream:
             digest, size = digest_stream(stream)
         if not size:
-            raise RuntimeError("Arquivo vazio; nenhum backup foi enviado.")
+            raise BackupError("EMPTY: arquivo vazio; nenhum backup foi enviado.")
 
+        progress('enviar arquivo para S3')
         s3.upload_file(str(archive), bucket, key, ExtraArgs={
             "ServerSideEncryption": "AES256",
             "ChecksumAlgorithm": "SHA256",
             "Metadata": {"sha256": digest},
         })
         # Read back the actual bytes; matching metadata alone cannot prove integrity.
+        progress('verificar integridade no S3')
         response = s3.get_object(Bucket=bucket, Key=key)
         body = response["Body"]
         try:
@@ -72,7 +110,7 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
         finally:
             body.close()
         if (remote_digest, remote_size) != (digest, size):
-            raise RuntimeError("Falha de integridade no S3; backup nao confirmado.")
+            raise BackupError("INTEGRITY: falha de integridade no S3; backup nao confirmado.")
 
         manifest = {
             "archive_key": key, "sha256": digest, "bytes": size,
@@ -80,6 +118,7 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "format": "pg_dump-custom", "restore_tested": False,
         }
+        progress('publicar manifesto no S3')
         s3.put_object(
             Bucket=bucket, Key=key + ".json",
             Body=json.dumps(manifest).encode("utf-8"),
@@ -90,6 +129,7 @@ def run_backup(s3, database_url, bucket, prefix="smartic-pro/postgres"):
 
 def main():
     try:
+        progress('inicializar cliente S3')
         import boto3
 
         manifest = run_backup(
@@ -97,6 +137,9 @@ def main():
             os.environ.get("BACKUP_S3_BUCKET"),
             os.environ.get("BACKUP_S3_PREFIX", "smartic-pro/postgres"),
         )
+    except BackupError as error:
+        print(f'Backup falhou: {error}', file=sys.stderr)
+        return 1
     except Exception as error:
         # Do not expose URLs, credentials or database content in unattended logs.
         print(f"Backup falhou ({type(error).__name__}); verificar configuracao/acesso e dependencias.", file=sys.stderr)
