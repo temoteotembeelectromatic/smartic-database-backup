@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -85,6 +86,34 @@ def dump_failure(stderr):
 
 def progress(stage):
     print(f'Backup etapa: {stage}', flush=True)
+
+
+def s3_failure(error):
+    """Emit only allowlisted AWS codes, never the upload error's raw message."""
+    messages = {
+        'AccessDenied': 'acesso negado. Verifique s3:PutObject no prefixo do bucket, politica do bucket e encriptacao exigida.',
+        'AllAccessDisabled': 'acesso ao bucket desativado. Verifique o bucket e a conta AWS.',
+        'NoSuchBucket': 'bucket inexistente. Confirme BACKUP_S3_BUCKET.',
+        'InvalidAccessKeyId': 'chave AWS invalida. Confirme AWS_ACCESS_KEY_ID.',
+        'SignatureDoesNotMatch': 'assinatura rejeitada. Confirme o par AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY e a regiao.',
+        'ExpiredToken': 'credenciais temporarias expiradas. Renove as credenciais e AWS_SESSION_TOKEN.',
+        'InvalidToken': 'token AWS invalido. Confirme AWS_SESSION_TOKEN para credenciais temporarias.',
+        'AuthorizationHeaderMalformed': 'regiao ou autorizacao incorreta. Confirme AWS_DEFAULT_REGION.',
+        'PermanentRedirect': 'endpoint incorreto. Confirme a regiao do bucket em AWS_DEFAULT_REGION.',
+        'IllegalLocationConstraintException': 'regiao incorreta. Confirme AWS_DEFAULT_REGION.',
+        'InvalidRequest': 'pedido rejeitado pelo S3. Verifique as exigencias de encriptacao e a configuracao do bucket.',
+        'RequestTimeTooSkewed': 'relogio do sistema fora de sincronizacao.',
+        'SlowDown': 'limite temporario de pedidos S3 atingido. Tente mais tarde.',
+    }
+    response = getattr(error, 'response', None)
+    code = response.get('Error', {}).get('Code') if isinstance(response, dict) else None
+    if code not in messages:
+        # boto3 wraps ClientError in S3UploadFailedError and embeds its code.
+        match = re.search(r'An error occurred \(([A-Za-z0-9]+)\)', str(error))
+        code = match.group(1) if match else None
+    if code in messages:
+        return f'S3_{code}: {messages[code]}'
+    return None
 
 
 def digest_stream(stream):
@@ -180,7 +209,11 @@ def main():
         return 1
     except Exception as error:
         # Do not expose URLs, credentials or database content in unattended logs.
-        print(f"Backup falhou ({type(error).__name__}); verificar configuracao/acesso e dependencias.", file=sys.stderr)
+        diagnostic = s3_failure(error)
+        if diagnostic:
+            print(f'Backup falhou: {diagnostic}', file=sys.stderr)
+        else:
+            print(f"Backup falhou ({type(error).__name__}); verificar configuracao/acesso e dependencias.", file=sys.stderr)
         return 1
     print(f"Backup enviado e integridade verificada: {manifest['archive_key']} ({manifest['bytes']} bytes)")
     return 0

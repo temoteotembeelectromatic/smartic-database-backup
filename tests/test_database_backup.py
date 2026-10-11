@@ -8,6 +8,19 @@ from scripts import backup_database as backup
 
 
 class DatabaseBackupTests(unittest.TestCase):
+    def test_wrapped_s3_error_reports_code_without_private_details(self):
+        error = RuntimeError('Failed to upload /private/path to private-bucket: An error occurred (AccessDenied) when calling PutObject: secret credentials')
+        message = backup.s3_failure(error)
+        self.assertTrue(message.startswith('S3_AccessDenied:'))
+        self.assertNotIn('private', message)
+        self.assertNotIn('secret', message)
+
+    def test_structured_s3_error_and_unknown_error(self):
+        error = RuntimeError('sensitive text')
+        error.response = {'Error': {'Code': 'NoSuchBucket', 'Message': 'private bucket'}}
+        self.assertTrue(backup.s3_failure(error).startswith('S3_NoSuchBucket:'))
+        self.assertIsNone(backup.s3_failure(RuntimeError('An error occurred (SecretValue) private')))
+
     def test_database_diagnostics_never_echo_server_output(self):
         for source, code in [
             ('password authentication failed for user secret', 'PG_AUTH'),
