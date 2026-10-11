@@ -204,6 +204,9 @@ def main():
             os.environ.get("BACKUP_S3_BUCKET"),
             os.environ.get("BACKUP_S3_PREFIX", "smartic-pro/postgres"),
         )
+    except KeyboardInterrupt:
+        print('Backup interrompido (SIGINT); esta execucao nao confirmou a conclusao. Verifique o manifesto no S3 antes de considerar o backup valido.', file=sys.stderr)
+        return 130
     except BackupError as error:
         print(f'Backup falhou: {error}', file=sys.stderr)
         return 1

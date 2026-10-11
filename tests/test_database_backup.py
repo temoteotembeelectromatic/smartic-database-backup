@@ -8,6 +8,33 @@ from scripts import backup_database as backup
 
 
 class DatabaseBackupTests(unittest.TestCase):
+    @patch.dict('sys.modules', {'boto3': Mock()})
+    @patch.object(backup, 'run_backup', side_effect=KeyboardInterrupt)
+    def test_interruption_is_not_reported_as_success(self, run):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            status = backup.main()
+        self.assertEqual(status, 130)
+        self.assertIn('Backup interrompido', stderr.getvalue())
+        self.assertNotIn('Traceback', stderr.getvalue())
+        self.assertNotIn('Backup enviado', stdout.getvalue())
+
+    @patch.object(backup.shutil, 'which', side_effect=lambda name: name)
+    @patch.object(backup.subprocess, 'run')
+    def test_interrupted_export_cleans_temporary_archive_and_never_uploads(self, run, which):
+        paths = []
+        def interrupt(args, **kwargs):
+            archive = Path(args[args.index('--file') + 1])
+            archive.write_bytes(b'partial')
+            paths.append(archive)
+            raise KeyboardInterrupt
+        run.side_effect = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            backup.run_backup(self.s3, 'postgresql://host/db', 'bucket')
+        self.assertFalse(paths[0].parent.exists())
+        self.s3.upload_file.assert_not_called()
+        self.s3.put_object.assert_not_called()
+
     def test_wrapped_s3_error_reports_code_without_private_details(self):
         error = RuntimeError('Failed to upload /private/path to private-bucket: An error occurred (AccessDenied) when calling PutObject: secret credentials')
         message = backup.s3_failure(error)
